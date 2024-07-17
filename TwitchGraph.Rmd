@@ -1,0 +1,790 @@
+---
+title: "Twitch Graph"
+author: "Thomas Trigatti - 147390"
+date: "2024-07-24"
+output:
+  ioslides_presentation:
+    css: style.css
+    incremental: true
+    widescreen: true
+    smaller: true
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE
+)
+```
+
+## Twitch Gamers
+**Twitch.tv** è una piattaforma di livestreaming di proprietà di Amazon lanciata il 6 giugno 2011. La piattaforma consente principalmente lo streaming di videogiochi, trasmissioni di eventi e competizioni eSports (Competizioni Videoludiche). Poiché gli utenti possono seguirsi a vicenda, esiste una rete sociale sottostante a cui si può accedere tramite l'API pubblica. <br>
+Il dataset [Twitch Graph]() e il risultato del crawling della più grande componente connessa di questa rete sociale a partire dall'utente chiamato *"Lowko"*, eseguito nell'aprile del 2018 da [Benedek Rozemberczki e Rik Sarkar (2021)](https://arxiv.org/pdf/2101.03091.pdf). Il dataset Twitch Gamers rilasciato è un sottoinsieme pulito della rete sociale originale, alla quale è stato eseguito un filtraggio sui nodi e sugli archi in base ai seguenti principi:
+
+> * Non dovevano esserci attributi mancanti.
+> * Doveva esserci una relazione reciproca tra le varie coppie.
+> * I nodi dovevano far parte della componente connessa più grande.
+
+Il risultato di questo processo di pulizia dei dati è una rete sociale indiretta, con una sola componente connessa con circa 168 mila nodi e 6,79 milioni di archi.
+
+## Obiettivo
+L'obiettivo di questa analisi è esplorare e comprendere la struttura della rete sociale utilizzando diversi metodi di analisi delle reti: *Local analysis*, *Group analysis* e *Global analysis*. 
+
+## Domande
+  1. Quali sono gli account con il maggior numero di relazioni.
+  2. Quali sono gli account con il maggior numero di visualizzazioni.
+  3. Quali sono gli account "centrali" della rete sociale utilizzando le misure di centralità semplice. 
+  4. Qual è il miglior algoritmo di raggruppamento. Come viene suddivisa la rete.
+  5. La rete ridotta è ancora connessa. La distribuzione dei gradi della rete è una Power-law.
+  
+## Introduzione  
+```{r library, include=FALSE}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(igraph)
+library(ggplot2)
+```
+
+```{r import datasets, include=FALSE}
+TwitchGraph_Nodes <- read.csv("large_twitch_features.csv")
+TwitchGraph_Edges <- read.csv("large_twitch_edges.csv")
+```
+
+```{r Nodes Dataset Cleaning, include=FALSE}
+# Rename the columns for more immediate meaning
+# Rearrange columns order
+TwitchGraph_Nodes <- TwitchGraph_Nodes %>%
+  rename (id = numeric_id, 
+          explicit_content = mature, 
+          last_stream = updated_at, 
+          account_life_time = life_time)%>%
+  select(id, created_at, last_stream, account_life_time, views, language, everything()) %>%
+  arrange(id)
+
+# Modification of columns types
+TwitchGraph_Nodes$created_at <- as.Date(TwitchGraph_Nodes$created_at)
+TwitchGraph_Nodes$last_stream <- as.Date(TwitchGraph_Nodes$last_stream)
+TwitchGraph_Nodes$explicit_content <- as.character(bit::as.booltype(TwitchGraph_Nodes$explicit_content))
+TwitchGraph_Nodes$dead_account <- as.character(bit::as.booltype(TwitchGraph_Nodes$dead_account))
+TwitchGraph_Nodes$affiliate <- as.character(bit::as.booltype(TwitchGraph_Nodes$affiliate))
+```
+
+```{r Edges Dataset Cleaning, include=FALSE}
+# Rename the columns for more immediate meaning
+TwitchGraph_Edges <- TwitchGraph_Edges %>%
+  rename(id_1 = numeric_id_1,
+         id_2 = numeric_id_2) %>%
+  arrange(id_1, id_2)
+```
+
+Il dataset Twitch Gamers è suddiviso in due dataset, uno contenete i nodi della rete sociale e l'altro contenente le relazioni reciproche tra i vari account. <br>
+
+Il dataset dei nodi è composto da 9 variabili:
+
+> * **id** (int): L'identificativo dell'account.
+> * **created_at** (date): La data di creazione dell'account.
+> * **last_stream** (date): La data dell'ultima stream eseguita.
+> * **account_life_time** (int): Numero di giorni tra la data di creazione dell'account e l'ultima stream.
+> * **views** (int): Conteggio delle visualizzazione ricevute.
+> * **language** (char): Lingua nella quale vengono fatte le streaming.
+> * **explicit_content** (char): Indica se il contenuto trasmesso è esplicito o no.
+> * **dead_account** (char): Indica se l'account è "morto" o no.
+> * **affiliate** (char): Indica se l'account ha ottenuto la partner con Twitch o no.
+
+Mentre il dataset degli archi contiene sono due variabili: **id_1** e **id_2** che indicano la relazione reciproca tra gli identificativi dei due account.
+
+## 1. Top 10 account per numero di relazioni
+```{r Q1-1, include=FALSE}
+# Counting number of edges by id_1
+BestSocializer_Global_1 <- TwitchGraph_Edges %>%
+  count(id_1, sort=TRUE) %>%
+  rename(nEdges = n,
+         id = id_1)
+
+# Counting number of edges by id_2
+BestSocializer_Global_2 <- TwitchGraph_Edges %>%
+  count(id_2, sort=TRUE) %>%
+  rename(nEdges = n,
+         id = id_2)
+```
+
+```{r Q1-2, include=FALSE}
+# Summarize the number of edges calculated  previously
+BestSocializer_Global <- bind_rows(BestSocializer_Global_1, 
+                                   BestSocializer_Global_2) %>%
+  group_by(id) %>%
+  summarise(nEdges = sum(nEdges)) %>%
+  arrange(-nEdges)
+
+# Select only the top 10 streamers by number of edges
+BestSocializer_Global_10 <- head(BestSocializer_Global, 10)
+
+# Get Nodes and them info using the ids get by BestSocializer
+BestSocializer_Global_Info <- TwitchGraph_Nodes %>%
+  filter(id %in% BestSocializer_Global_10$id) %>%
+  full_join(BestSocializer_Global_10, by = "id") %>%
+  arrange(-nEdges)
+```
+
+```{r Q1-3, include=FALSE}
+# Calculating pearson correlation betweeen nEdges and Views
+nEdgesViews_Correlation_1 <- round(cor(BestSocializer_Global_Info[, "nEdges"], BestSocializer_Global_Info[, "views"]), 3)
+```
+
+```{r Q1-4, include=FALSE}
+# Calculating pearson correlation betweeen nEdges and Views
+nEdgesAccLifeTime_Correlation_1 <- round(cor(BestSocializer_Global_Info[, "nEdges"], BestSocializer_Global_Info[, "account_life_time"]), 3)
+```
+
+Il seguente grafico presenta i primi 10 account nel dataset in base al maggior numero di relazione della rete sociale, ordinati in base al numero di relazioni degli stessi.
+
+* Osservando il grafico si emerge una correlazione tra il decremento delle relazioni associate a un determinato account e la conseguente riduzione delle visualizzazioni ricevute. Il valore di correlazione calcolato tramite Pearson è `r nEdgesViews_Correlation_1`.
+* L'unica eccezione marcata è rappresentata dall'account **155127**, anche occupando l'ottava posizione nella graduatoria, si discosta dagli altri con un numero di visualizzazioni significativo, circa 80 milioni dalla nona e dedima posizione.
+* Un'altra correlazione interessante e quella tra il numero di relazioni instaurate e la longevità dell'account sulla piattaforma. Il valore di correlazione calcolato tramite Pearson è `r nEdgesAccLifeTime_Correlation_1`.
+
+```{r Q1-5, echo=FALSE}
+# Showing the plot of BestSocializer
+BestSocializer_Global_Info %>%
+  mutate(views = views/1000000) %>%
+  rename(views_M = views) %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = views_M, fill = account_life_time)) +
+            geom_bar(stat = "identity") +
+            scale_y_continuous(breaks = seq(0, 350, 50)) +
+            geom_text(aes(label = nEdges), 
+                      vjust = 1.3, 
+                      color = "white", 
+                      size = 3.5) +
+            labs(title = "Top 10 accounts per numero di relazione in comparazione
+con il numero di visualizzazioni ricevute",
+                subtitle = "L'etichetta indica il numero di relazioni dell'account nella rete sociale.",
+                caption = "Twitch Relations Graph - 2018",
+                x = "Account Id",
+                y = "Visualizzazioni (M)",
+                fill = "Tempo di vita 
+dell'account (gg)") +
+            theme_classic()
+```
+
+## 2. Top 10 account per numero di visualizzazioni
+```{r Q2-1, include=FALSE}
+# Extract the top 10 accounts based on views
+Top10Accounts_byViews <- TwitchGraph_Nodes %>%
+  arrange(-views) %>%
+  slice_head(n = 10) %>%
+  mutate(views = views/1000000) %>%
+  rename(views_M = views)
+
+# Get the number of relations of the top 10 accounts based on views
+Top10Accounts_byViews <- BestSocializer_Global %>%
+  filter(id %in% Top10Accounts_byViews$id) %>%
+  full_join(Top10Accounts_byViews, by = "id") %>%
+  arrange(-nEdges) %>%
+  select(-nEdges, nEdges)
+```
+
+```{r Q2-2, include=FALSE}
+# Calculating pearson correlation betweeen nEdges and Views
+nEdgesViews_Correlation_2 <- round(cor(Top10Accounts_byViews[, "nEdges"], Top10Accounts_byViews[, "views_M"]), 3)
+```
+
+```{r Q2-3, include=FALSE}
+# Calculating pearson correlation betweeen nEdges and Views
+nEdgesAccLifeTime_Correlation_2 <- round(cor(Top10Accounts_byViews[, "nEdges"], Top10Accounts_byViews[, "account_life_time"]), 3)
+```
+
+Il seguente grafico presenta i primi 10 account nel dataset in base al maggior numero di visualizzazioni ricevute, ordinati in base al numero di relazioni degli stessi.
+
+* In questo caso, invece, la correlazione tra numero di relazioni e visualizzazione è piu debole e negativa, infatti il valore di correlazione calcolato tramite Pearson è `r nEdgesViews_Correlation_2`.
+* La correlazione tra il numero di relazioni e la longevità dell'account sulla piattaforma, rimane più o meno della stessa intensità, con un valore di correlazione calcolato tramite Pearson è `r nEdgesAccLifeTime_Correlation_2`.
+
+
+```{r Q2-4, echo=FALSE}
+# Showing the plot of Top10Accounts_byViews
+Top10Accounts_byViews %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = views_M, fill = account_life_time)) +
+            geom_bar(stat = "identity") +
+            scale_y_continuous(breaks = seq(0, 400, 50)) +
+            geom_text(aes(label = nEdges), 
+                      vjust = 1.5, 
+                      color = "white", 
+                      size = 3.5) +
+            labs(title = "Top 10 accounts per visualizzazioni ricevute in comparazione 
+al numero di visualizzazioni",
+                subtitle = "Gli account sono ordinati in base al numero di relazioni.
+L'etichetta indica il numero di relazioni dell'account nella rete sociale.",
+                caption = "Twitch Relations Graph - 2018",
+                x = "Account Id",
+                y = "Visualizzazioni (M)",
+                fill = "Tempo di vita 
+dell'account (gg)") +
+            theme_classic()
+```
+
+## Camparazione tra gli account delle due Top 10
+```{r Q2.5-1, include=FALSE}
+Top10Accounts_byViews_Category <- Top10Accounts_byViews %>%
+  add_column(TopCategory_2 = "Views") %>%
+  select(id, TopCategory_2, nEdges)
+
+Top10_Comparison <- BestSocializer_Global_Info %>%
+  add_column(TopCategory_1 = "Relations") %>%
+  full_join(Top10Accounts_byViews_Category, by = "id") %>%
+  unite(TopCategory, TopCategory_1, TopCategory_2, 
+               sep=" & ", na.rm = TRUE) %>%
+  unite(nEdges, nEdges.x, nEdges.y, sep = '-', na.rm = TRUE) %>%
+  separate(nEdges, c("nEdges", "toRemove")) %>%
+  select(id, TopCategory, nEdges)
+
+# Modification of nEdges column type
+Top10_Comparison$nEdges <- as.integer(Top10_Comparison$nEdges)
+```
+
+```{r Q2.5-2, echo=FALSE}
+Top10_Comparison %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = nEdges, fill = TopCategory)) +
+            geom_bar(stat = "identity") +
+            scale_y_continuous(breaks = seq(0, 35000, 5000)) +
+            labs(title = "Comparazione tra i Top 10 account estratti per numero di relazione e
+gli account estratti per numero di visualizzazioni",
+                caption = "Twitch Relations Graph - 2018",
+                x = "Account Id",
+                y = "Numero di Relazioni",
+                fill = "Categoria di appartenenza 
+alla Top") +
+            theme_classic() + 
+            theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5)) 
+```
+
+Mettendo in relazione gli account della rete sociale ottenuti con i due metodi precedenti e mettendoli a confronto, si può notare: 
+
+* Gli account nelle posizione più alte della graduatoria sono stati selezionati da entrambi i metodi, ovvero dal numero di relazioni e dalle visualizzazioni ricevute. Unica eccezione data dalla terza posizione dove l'account è stato selezionato solo dal primo metodo.
+* Gli account a metà classifica sono quelli selezionati in base al numero di relazioni massime all'interno della rete sociale.
+* Gli account in fondo alla classifica sono quelli selezionati in base al numero visualizzazioni ricevute.
+
+## Riduzione della numerosità della rete sociale
+
+```{r GraphCreation-1, include=FALSE}
+# Reducing the number of nodes of the network
+nNodesReduction <- 25000
+
+TwitchGraph_Nodes_Reduced <- TwitchGraph_Nodes %>%
+  full_join(BestSocializer_Global, by = "id") %>%
+  arrange(-nEdges, -views, -account_life_time) %>%
+  select(-nEdges) %>%
+  head(nNodesReduction)
+```
+
+```{r GraphCreation-2, include=FALSE}
+# Reducing the number of edges of the network by node ids
+TwitchGraph_Edges_Reduced <- TwitchGraph_Edges %>%
+  filter(id_1 %in% TwitchGraph_Nodes_Reduced$id & 
+         id_2 %in% TwitchGraph_Nodes_Reduced$id) %>%
+  arrange(id_1, id_2)
+```
+
+```{r GraphCreation-3, include=FALSE}
+TwitchGraph <- graph_from_data_frame(vertices = TwitchGraph_Nodes_Reduced, 
+                                     d = TwitchGraph_Edges_Reduced, 
+                                     directed = FALSE)
+```
+
+```{r GraphCreation-4, include=FALSE}
+nEdgesReduction <- ecount(TwitchGraph)
+```
+
+* In base ai risultati ottenuti dalle due analisi esplorative precedenti, e avendo visto che non era possibile effettuare le analisi successive utilizzando l'intera rete sociale del dataset, ho deciso di ridurre la numerosità della rete a `r prettyNum(nNodesReduction, big.mark = ".", scientific = FALSE)` nodi.
+La riduzione è stata fatta dopo aver ordinato i nodi della rete in modo decrescente per numero di relazioni, numero di visualizzazioni e longevità dell'account.
+Selezionando quindi i primi `r prettyNum(nNodesReduction, big.mark = ".", scientific = FALSE)` nodi. della rete dopo l'ordinamento, il numero di archi della rete è stato ridotto, di conseguenza, a `r prettyNum(nEdgesReduction, big.mark = ".", scientific = FALSE)`.
+
+## 3. Confronto tra le misure di centralità semplice
+
+* Degree Centrality
+* Closeness Centrality
+* Betweenness Centrality
+
+## 3.1 Degree Centrality
+```{r Q3-1, include=FALSE}
+# Calculate degree centrality
+degreeCentrality <- as.data.frame(degree(TwitchGraph, normalized = TRUE))
+```
+
+```{r Q3-2, include=FALSE}
+# Select only the top 10 accounts by degree centrality
+degreeCentrality_10 <- degreeCentrality %>%
+  rename (degree = 'degree(TwitchGraph, normalized = TRUE)') %>%
+  arrange(-degree) %>%
+  head(10)
+
+# Convert the rowname with node id into a column
+degreeCentrality_10 <- rownames_to_column(degreeCentrality_10, "id")
+```
+
+```{r Q3-3, include=FALSE}
+# Calculating the numeber of relationships of the nodes of the social network
+RealtionNumber_Reduced <- as.data.frame(degree(TwitchGraph))
+RealtionNumber_Reduced <- RealtionNumber_Reduced %>%
+  rename (nEdges = 'degree(TwitchGraph)') %>%
+  arrange(-nEdges)
+
+# Convert the rowname with node id into a column
+RealtionNumber_Reduced <- rownames_to_column(RealtionNumber_Reduced, "id")
+```
+
+```{r Q3-4, include=FALSE}
+# Extract number of relationships of top 10 nodes by degree centrality
+degreeCentrality_10_nEdges <- RealtionNumber_Reduced %>%
+  filter(id %in% degreeCentrality_10$id) %>%
+  full_join(degreeCentrality_10, by = "id") %>%
+  arrange(-degree)
+```
+
+```{r Q3-5, echo=FALSE}
+# Showing the plot of degree centrality
+degreeCentrality_10_nEdges %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = degree)) +
+            geom_bar(stat = "identity", fill="#4169E1") +
+            geom_text(aes(label = nEdges), 
+                      vjust = 1.5, 
+                      color = "white", 
+                      size = 3.5) +
+            labs(title = "Top 10 accounts per numero di vicini nella rete sociale.",
+                 subtitle = "L'etichetta associata al nodo rappresenta il conteggio delle sue relazioni nella rete.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Account Id",
+                 y = "Degree Centrality normalizzata") +
+            theme_classic()
+```
+
+
+La misura di centralità *degree centrality* è stata calcolata in modo normalizzato, utilizzando la formula $Dc_N(v) = \frac{d(v)}{n-1}$, in modo tale da rendere possibile il confronto tra i vari nodi. <br>
+Dal grafico possiamo osservare che i primi 10 nodi della rete sociale presentano una connessione con gli altri nodi della rete che varia da un massimo di circa il 41% a un minimo di circa il 21%. <br>
+La limitazione di questa misura di centralità è che considera solo il numero di relazioni per determinare l'importanza di un nodo nella rete. Questa limitazione può essere superata calcolando anche la *closeness centrality* e la *betweenness centrality*.
+
+## 3.2 Closeness Centrality
+```{r Q3-6, include=FALSE}
+# Calculate closeness centrality
+closenessCentrality <- as.data.frame(closeness(TwitchGraph, normalized = TRUE))
+```
+
+```{r Q3-7, include=FALSE}
+# Select only the top 10 accounts by closeness centrality
+closenessCentrality_10 <- closenessCentrality %>%
+  rename (closeness = 'closeness(TwitchGraph, normalized = TRUE)') %>%
+  arrange(-closeness) %>%
+  head(10)
+
+# Convert the rowname with node id into a column
+closenessCentrality_10 <- rownames_to_column(closenessCentrality_10, "id")
+```
+
+```{r Q3-8, include=FALSE}
+# Extract number of relationships of top 10 nodes by closeness centrality
+closenessCentrality_10_nEdges <- RealtionNumber_Reduced %>%
+  filter(id %in% closenessCentrality_10$id) %>%
+  full_join(closenessCentrality_10, by = "id") %>%
+  arrange(-closeness)
+```
+
+```{r Q3-9, echo=FALSE}
+# Showing the plot of closeness centrality
+closenessCentrality_10_nEdges %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = closeness)) +
+            geom_bar(stat = "identity", fill="#4169E1") +
+            geom_text(aes(label = nEdges), 
+                    vjust = 1.5, 
+                    color = "white", 
+                    size = 3.5) +
+            labs(title = "Top 10 accounts in base alla loro vicinanza a nodi della rete rispetto agli altri nodi.",
+                 subtitle = "L'etichetta associata al nodo rappresenta il conteggio delle sue relazioni nella rete.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Account Id",
+                 y = "Closeness Centrality normalizzata") +
+            theme_classic()
+```
+
+Anche per la *closeness centrality* è stato calcolato il valore normalizzato in modo tale da permettere il confronto tra i vari nodi, utilizzando la formula $Cc_N(v) = \frac{n-1}{\sum_{u \in V} dist(v, u)}$. <br>
+Il valore della closeness centrality normalizzata per i primi 10 nodi è notevolmente omogeneo, variando da un massimo di circa 0.63 a un minimo di circa 0.56. Questo suggerisce che questi nodi sono centrali nella rete, facilitando un accesso efficiente agli altri nodi, ad esempio per la diffusione di informazioni e notizie.
+
+## 3.3 Betweenness Centrality
+```{r Q3-10, include=FALSE}
+# Calculate betweenness centrality
+betweennessCentrality <- as.data.frame(betweenness(TwitchGraph, normalized = TRUE))
+```
+
+```{r Q3-11, include=FALSE}
+# Select only the top 10 accounts by betweenness centrality
+betweennessCentrality_10 <- betweennessCentrality %>%
+  rename (betweenness = 'betweenness(TwitchGraph, normalized = TRUE)') %>%
+  arrange(-betweenness) %>%
+  head(10)
+
+# Convert the rowname with node id into a column
+betweennessCentrality_10 <- rownames_to_column(betweennessCentrality_10, "id")
+```
+
+```{r Q3-12, include=FALSE}
+# Extract number of relationships of top 10 nodes by betweenness centrality
+betweennessCentrality_10_nEdges <- RealtionNumber_Reduced %>%
+  filter(id %in% betweennessCentrality_10$id) %>%
+  full_join(betweennessCentrality_10, by = "id") %>%
+  arrange(-betweenness)
+```
+
+```{r Q3-13, echo=FALSE}
+# Showing the plot of betweenness centrality
+betweennessCentrality_10_nEdges %>%
+  # Casting id as a factor for plotting correctly
+  mutate(id = factor(id, levels = id)) %>%
+  ggplot(aes(x = id, y = betweenness)) +
+            geom_bar(stat = "identity", fill="#4169E1") +
+            geom_text(aes(label = nEdges), 
+                    vjust = 1.5, 
+                    color = "white", 
+                    size = 3.5) +
+            labs(title = "Top 10 accounts in base al numero di cammini che passano per un nodo 
+rispetto agli altri nodi.",
+                 subtitle = "L'etichetta associata al nodo rappresenta il conteggio delle sue relazioni nella rete.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Account Id",
+                 y = "Betweenness Centrality normalizzata") +
+            theme_classic()
+```
+
+Anche il valore della *betweenness centrality* è stato normalizzato per consentire un confronto tra i nodi della rete, utilizzando la formula $Bc_N(v) = \frac{2B}{(n-1)(n-2)}$. <br>
+Possiamo notare come il valore di betweenness centrality massimo riscontrato, pari a circa 0.061, è molto basso rispetto al massimo possibile, ovvero 1, ma questo comunque non vuol dire che il nodo in questione non sia *"centrale"* nella rete. Infatti, la betweenness centrality calcola quanto un nodo svolga un ruolo di ponte o intermediario tra altri nodi nella rete. In questa rete, essendo una *giant component*, non è necessario che i nodi svolgano questo tipo di compito.
+
+## Comparazione tra i nodi estratti dalle misure di centralità semplice
+```{r Q3-14, include=FALSE}
+# Add a column to differentiate accounts according to centrality
+degreeCentrality_10_Comp <- degreeCentrality_10 %>%
+  rename(centralityValue = degree) %>%
+  add_column(Centrality = "Degree")
+
+closenessCentrality_10_Comp <- closenessCentrality_10 %>%
+  rename(centralityValue = closeness) %>%
+  add_column(Centrality = "Closeness")
+
+betweennessCentrality_10_Comp <- betweennessCentrality_10 %>%
+  rename(centralityValue = betweenness) %>%
+  add_column(Centrality = "Betweenness")
+
+# Combining the three data frames
+centralityComparison <- rbind(degreeCentrality_10_Comp, 
+                              closenessCentrality_10_Comp,
+                              betweennessCentrality_10_Comp)
+
+centralityComparison <- centralityComparison %>%
+  mutate(id = factor(id, levels = rev(unique(id)), ordered=TRUE))
+```
+
+Il grafico seguente mostra i nodi selezionati dalle tre misure di centralità.
+Possiamo notare che tutti i nodi mostrano un aumento nei valori delle tre misure di centralità all'aumentare della posizione nella graduatoria. Inoltre, su un totale di 11 nodi selezionati, i primi 9 sono stati identificati da tutte e tre le misure di centralità. Il decimo nodo è stato selezionato solo dalla degree centrality e closeness centrality, mentre l'undicesimo solo dalla betweenness centrality, coerentemente con le considerazioni precedenti.
+
+```{r Q3-15, echo=FALSE}
+# Showing the plot of comparison between centrality measurements
+centralityComparison %>%
+  ggplot(aes(x = id, y = centralityValue, fill=Centrality)) +
+            geom_bar(stat = "identity", position=position_dodge()) +
+            labs(title = "Comparazione degli account selezionati dalle tre misure di centralità",
+                 subtitle = "I nodi sono ordinati dall'undicesima alla prima posizione.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Account Id",
+                 y = "Misure di centralità normalizzate ",
+                 fill = "Misura di Centralità") +
+            theme_classic() + 
+            theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5)) 
+```
+
+## 4. Algoritmi di grouping 
+
+```{r Q4-1, include=FALSE}
+# Get modularity values for grouping algorithms
+
+modularityValues = rep(0, 6)
+modularityValues[1] = modularity(cluster_leading_eigen(TwitchGraph))
+modularityValues[2] = modularity(cluster_fast_greedy(TwitchGraph))
+modularityValues[3] = modularity(cluster_walktrap(TwitchGraph))
+modularityValues[4] = modularity(cluster_label_prop(TwitchGraph))
+modularityValues[5] = modularity(cluster_infomap(TwitchGraph))
+modularityValues[6] = modularity(cluster_louvain(TwitchGraph))
+names(modularityValues) = c("leading_eigen", 
+                            "fast_greedy", 
+                            "walktrap", 
+                            "label_prop", 
+                            "infomap", 
+                            "louvain")
+```
+
+```{r Q4-2, include=FALSE}
+# Modularity list to dataframe for visualizzation
+modularityValues_df <- data.frame(values = unlist(modularityValues))
+modularityValues_df <- modularityValues_df %>%
+  rownames_to_column(var = "algorithms") %>%
+  mutate(values = round(values, 4)) %>%
+  arrange(-values)
+
+modularityValues_df <- modularityValues_df %>%
+  add_row(algorithms = "edge_betweenness", values = NA) %>%
+  add_row(algorithms = "spinglass", values = NA) %>%
+  add_row(algorithms = "optimal", values = NA)
+
+# Getting the labes for plotting
+smallLabels_modularity <- modularityValues_df %>%
+  tail(4) %>%
+  select(algorithms, values) %>%
+  mutate(values = replace_na(values, 0))
+
+bigLabels_modularity <- modularityValues_df %>%
+  head(5) %>%
+  select(algorithms, values)
+```
+
+Nel contesto degli algoritmi di raggruppamento dei nodi nella rete, ho calcolato il valore di **modularity** per ciascuno di essi. La modularity misura l'efficacia della suddivisione della rete proposta da ciascun algoritmo di individuazione delle comunità, ovvero quanto efficacemente l'algoritmo separa i diversi tipi di nodi all'interno della rete.
+Possiamo notare che l'algoritmo *louvain* ha il valore di modularity più alto rispetto agli altri, che invece, apparte per l'algoritmo *label_prop*, hanno più o meno lo stesso valore.
+Per quanto riguarda gli ultimi tre algoritmi che presentano il valore di modularity pari a **0**, ciò è attribuito a due motivi principali:
+
+> * Per quanto riguarda l'algoritmo *optimal*, la sua computazione ha generato un errore che ha impedito la corretta valutazione.
+> * Invece, per gli algoritmi *edge_betweenness* e *spinglass*, nonostante la rete sociale ridotta, richiedevano una computatione troppo onerosa in termini di tempo.
+
+```{r Q4-3, echo=FALSE}
+modularityValues_df %>%
+  # Converting NA values to 0 for plotting
+  mutate(values = replace_na(values, 0)) %>%
+  # Casting algorithms as a factor for plotting correctly
+  mutate(algorithms = factor(algorithms, levels = algorithms)) %>%
+  ggplot(aes(x = algorithms, y = values)) +
+            geom_bar(stat = "identity", fill="#4169E1") +
+            geom_text(data = smallLabels_modularity, 
+                      aes(label = format(values, scientific = FALSE)), 
+                      color = "black", 
+                      vjust = -1.5, 
+                      size = 3.5) +
+            geom_text(data = bigLabels_modularity, 
+                      aes(label = values), 
+                      color = "white", 
+                      vjust = 1.5, 
+                      size = 3.5) +
+            labs(title = "Valore di modularity per i vari algoritmi di grouping.",
+                 subtitle = "L'etichetta associata all'algoritmo rappresenta il valore di modularity associato.
+Non è stato possibile calcolare i valori per gli algoritmi \"edge_betweenness\", \"spinglass\" e \"optimal\".",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Algoritmi di grouping",
+                 y = "Modularity") +
+            theme_classic() + 
+            theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5)) 
+```
+
+```{r Q4-4, include=FALSE}
+# Grouping Analisys -> louvain algorithm
+
+# Calculation Louvain algorithm
+LouvainCluster <- cluster_louvain(TwitchGraph)
+
+# Calculation Louvain algorithm
+LeadingEigenCluster <- cluster_leading_eigen(TwitchGraph)
+```
+
+```{r Q4-5, include=FALSE}
+# Number of communities and their size in term of number of nodes
+LouvainCluster_sizes <- sizes(LouvainCluster)
+
+# Number of communities and their size in term of number of nodes
+LeadingEigenCluster_sizes <-sizes(LeadingEigenCluster)
+```
+
+Per l'analisi delle comunità presenti nella rete, sono stati utilizzati i primi due algoritmi identificati dal valore di modularity, visto nel grafico precedente, *louvain* e *cluster_leading_eigen*. <br>
+L'algoritmo *louvain* ha identificato `r length(LouvainCluster_sizes)` comunità, con un numero di nodi rispettivamente: <br><br>
+`r LouvainCluster_sizes` <br>
+
+Invece, l'algoritmo *cluster_leading_eigen* ha identificato `r length(LeadingEigenCluster_sizes)` comunità, con un numero di nodi rispettivamente: <br><br>
+`r LeadingEigenCluster_sizes` <br>
+
+Nell'analisi delle comunità identificate dai due algoritmi, non è emersa una distinzione significativa nei valori degli attributi dei nodi all'interno dei diversi raggruppamenti. Questo suggerisce che le suddivisioni della rete in comunità, possono non rispecchiarsi sulle caratteristiche individuali dei nodi, ma si basano quasi unicamente sulla struttura della rete stessa.
+
+## 5. Global Analisys della rete {.build}
+
+```{r Q5-1, include=FALSE}
+# Check if the network is connected even after resizing
+isConnected <- is_connected(TwitchGraph)
+
+# Get Giant Component
+networkComponents <- components(TwitchGraph)
+giantCompNodes = which(networkComponents$membership == which.max(networkComponents$csize))
+```
+
+* Nell'analisi globale, la prima verifica effettuata è stata sulla connessione della rete sociale ridotta, con esito `r isConnected`.
+* Poiché la rete di partenza era una giant component, è stato analizzato se la rete ridotta conservasse questa caratteristica. Il numero totale dei nodi nella rete ridotta è pari a `r prettyNum(vcount(TwitchGraph), big.mark = ".", scientific = FALSE)`, mentre i nodi presenti nella giant component della rete sono `r prettyNum(length(giantCompNodes), big.mark = ".", scientific = FALSE)`. 
+  + Di conseguenza, possiamo confermare che l'intera rete costituisce ancora una giant component.
+
+```{r Q5-2, include=FALSE}
+# Average distance between nodes (degree of separation)
+meanDist <- mean_distance(TwitchGraph)
+
+# Maximum geodesic distance between nodes (diameter)
+diameter <- diameter(TwitchGraph)
+```
+
+* Come secondo punto dell'analisi globale, è stata valutata la distanza media tra i nodi della rete, che ha un valore di `r meanDist`. Inoltre, è stato calcolato il diametro della rete, che rappresenta la massima distanza tra i nodi ed è pari a `r diameter`. 
+Sulla base di questi due valori, una distanza media bassa e un diametro limitato, è possibile classificare la rete sociale in esame come una rete di tipo **Small-world**. Secondo i modelli matematici, in una rete di tipo Small-world il diametro è previsto essere vicino al logaritmo del numero dei nodi. Nel nostro caso, il logaritmo in base 10 di 25.000 è pari a `r log10(25000)`, il quale approssima adeguatamente il valore del diametro osservato.
+
+```{r Q5-3, include=FALSE}
+# Getting the distances between the nodes of the network
+distanceTable <- distance_table(TwitchGraph)
+paths <- distanceTable$res
+paths_df <- data.frame(paths = unlist(paths))
+
+paths_df <- paths_df %>%
+  rownames_to_column(var = "distance") %>%
+  mutate(distance = as.integer(distance)) %>%
+  mutate(frequency = paths) %>%
+  mutate(frequency = frequency / sum(frequency)) %>%
+  mutate(frequency = round(frequency, 4))
+
+# Getting the labes for plotting
+smallLabels_path <- paths_df %>%
+  filter(distance == 1 | distance == 4) %>%
+  select(distance, frequency)
+
+bigLabels_path <- paths_df %>%
+  filter(distance == 2 | distance == 3) %>%
+  select(distance, frequency)
+```
+
+```{r Q5-4.1-removed, eval=FALSE, include=FALSE}
+# Analysis removed as the submission would have exceeded the maximum presentation time.
+
+#Come passo successivo, sono stati analizzati i risultati precedenti sulla distanza media e massima tra i nodi attraverso la distribuzione di frequenza dei percorsi nella rete per verificarne la correttezza. 
+#È possibile osservare tramite il grafico, che circa il 75% dei percorsi nella rete ha una lunghezza pari a 2, seguito da circa il 25% dei percorsi con lunghezza pari a 3. Questa distribuzione di frequenza sostiene il risultato precedente riguardante la distanza media tra i nodi.
+
+#Inoltre è possibile osservere, anche se molto bassa, una precentuale di percorsi di lunghezza 4, che corrisponde alla distanza massima osservabile nella rete. Questo conferma il valore del diametro precedentemente calcolato.
+```
+
+```{r Q5-4.2-removed, include=FALSE}
+# Analysis removed as the submission would have exceeded the maximum presentation time.
+
+paths_df %>%
+  # Casting algorithms as a factor for plotting correctly
+  mutate(distance = factor(distance, levels = distance)) %>%
+  ggplot(aes(x = distance, y = frequency)) +
+            geom_bar(stat = "identity", fill="#4169E1") +
+            geom_text(data = smallLabels_path, 
+                      aes(label = format(frequency, scientific = FALSE)), 
+                      color = "black", 
+                      vjust = -1.5, 
+                      size = 3.5) +
+            geom_text(data = bigLabels_path, 
+                      aes(label = frequency), 
+                      color = "white", 
+                      vjust = 1.5, 
+                      size = 3.5) +
+            labs(title = "Distribuzione della frequenza relativa della lunghezza dei path della rete.",
+                 subtitle = "L'etichetta associata alla distanza rappresenta il valore della frequenza relativa associato.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Distanze dei path",
+                 y = "Frequenza relativa dei path") +
+            theme_classic()
+```
+
+```{r Q5-5, include=FALSE}
+# Calculate degree distribution of the network for check if is a Scale-free network
+deegreeDistribution = degree(TwitchGraph)
+
+# skewness function
+skewness = function(x) mean( (x - mean(x))^3 ) / sd(x)^3
+
+skewness <- skewness(deegreeDistribution)
+summaries <- summary(deegreeDistribution)
+
+deegreeDistribution_df <- as.data.frame(deegreeDistribution)
+deegreeDistribution_df <- deegreeDistribution_df %>%
+  rename(degree = deegreeDistribution)
+```
+
+* Come terzo punto dell'analisi globale, è stata esaminata la distribuzione della frequenza dei gradi dei nodi per determinare se la rete sociale possa essere classificata come una rete di tipo Scale-free, caratterizzata da una distribuzione a coda lunga dei gradi dei nodi.
+
+* Un metodo per valutare questa caratteristica è il calcolo della *skewness*, che misura quanto una distribuzione sia asimmetrica rispetto alla sua media. In questo caso, il valore di skewness è pari a `r skewness`, mentre la mediana della distribuzione dei gradi è `r summaries[3]` e la media è `r summaries[4]`. Poiché il valore della mediana è inferiore alla media, la distribuzione è asimmetrica verso destra, indicando che non presenta una coda lunga.
+* Questa conclusione è ulteriormente supportata dall'osservazione del grafico della distribuzione dei gradi, il quale mostra una concentrazione elevata di nodi con grado basso e l'assenza di una coda lunga.
+
+```{r Q5-6, echo=FALSE}
+deegreeDistribution_df %>%
+  ggplot(aes(x = degree)) +
+    geom_histogram(binwidth = 100, fill="#4169E1") + 
+    scale_x_continuous(breaks = seq(0, 10000, 1000)) +
+    scale_y_continuous(breaks = seq(0, 15000, 2500)) +
+    labs(title = "Distribuzione della frequenza dei gradi dei nodi della rete.",
+                 caption = "Twitch Relations Graph Reduced - 2018",
+                 x = "Gradi dei nodi",
+                 y = "Frequenza dei gradi") +
+    theme_classic()
+```
+
+```{r Q5-7, include=FALSE}
+# Cumulative distribution
+ccdf = function(degree) {
+  len = length(degree)
+  max = max(degree)
+  p = rep(0, max)
+  for (i in 1:length(p)) {
+    p[i] = length(degree[degree >= i]) / len
+  } 
+  return(p)
+}
+
+ccdf_value = ccdf(deegreeDistribution)
+
+ccdf_value_df <- as.data.frame(ccdf_value)
+
+ccdf_value_df <- ccdf_value_df %>%
+  rownames_to_column(var = "degree") %>%
+  mutate(degree = as.integer(degree)) %>%
+  rename(ccdf = ccdf_value) 
+```
+
+```{r Q5-8, include=FALSE}
+# Create the expected CCDF distribution if it is a Power-law distribution
+max_value <- max(ccdf_value_df$ccdf, na.rm = TRUE)
+min_value <- min(ccdf_value_df$ccdf, na.rm = TRUE)
+min_degree <- min(ccdf_value_df$degree)
+max_degree <- max(ccdf_value_df$degree)
+expected_df <- data.frame(degree = c(min_degree, max_degree), ccdf = c(max_value, min_value))
+```
+
+* Un altro metodo per verificare se una rete è di tipo Scale-free è quello di graficare il valore di *CCDF* (complementary cumulative distribution function) con scale logaritmiche, per visualizzare se la distribuzione dei gradi è una power-law. Se la distibuzione dei gradi segue una distribuzione power-law, allora il grafico, su scala log-log, risultante del CCDF appare come una linea retta con pendenza negativa.
+    + Il valore di CCDF è calcolabile utilizzando la formula $P_k = \sum_{x=k}^{\infty} p_x$, che misura la percentuale di vertici della rete che hanno un grado pari a *k* o superiore.
+
+```{r Q5-9, echo=FALSE}
+# Plotting the CCDF distribuzione of the network
+ccdf_value_df %>%
+  ggplot(aes(x = degree, y = ccdf)) +
+    geom_line() +
+    geom_line(data = expected_df, aes(x = degree, y = ccdf), color = "red", linetype = "dashed") +
+    scale_x_log10() +
+    scale_y_log10(labels = function(x) format(x, scientific = FALSE)) +
+    labs(title = "Distribuzione del CCDF rispetto ai gradi dei nodi.",
+         subtitle = "Entrambe le scale del grafico sono in scala logaritmica per verificare se la distribuzione dei gradi 
+della rete è una Power-law.
+La linea tratteggiato rossa mostra la distribuzione del CCDF se fosse stata una Power-law.",
+         caption = "Twitch Relations Graph Reduced - 2018",
+         x = "Gradi dei nodi (log)",
+         y = "CCDF (log)") +
+    theme_classic()
+```
+
+* Come è possibile osservare nel grafico della distribuzione del CCDF, e dai risultati ottenuti dai medoti precedenti, è possibile concludere che la rete sociale di *Twitch*, in esame, non è di tipo **Scale-free**.
+
+# Fine
